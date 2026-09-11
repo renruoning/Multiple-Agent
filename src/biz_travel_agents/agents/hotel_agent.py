@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from ..config import build_chat_model
+from ..config import LLM_CIRCUIT_BREAKER, build_chat_model
+from ..core.resilience import call_with_resilience
 from ..state import TravelState
 from ..tools.hotel_tools import search_hotels
 
@@ -39,8 +40,20 @@ def hotel_node(state: TravelState) -> dict:
     llm = build_chat_model()
     structured_llm = llm.with_structured_output(HotelChoice)
     human_prompt = f"出差需求: {req}\n候选酒店: {options}{retry_hint}"
-    choice: HotelChoice = structured_llm.invoke(
-        [("system", SYSTEM_PROMPT), ("human", human_prompt)]
+
+    def _call_llm() -> HotelChoice:
+        return structured_llm.invoke([("system", SYSTEM_PROMPT), ("human", human_prompt)])
+
+    def _fallback_cheapest() -> HotelChoice:
+        # options 已按单价升序排列，LLM 不可用时退化为"直接选最便宜的"。
+        cheapest = options[0]
+        return HotelChoice(
+            hotel_name=cheapest["hotel_name"],
+            reason="[降级] LLM 不可用，规则兜底选择单价最低的酒店",
+        )
+
+    choice = call_with_resilience(
+        _call_llm, breaker=LLM_CIRCUIT_BREAKER, fallback_fn=_fallback_cheapest
     )
 
     selected = next(

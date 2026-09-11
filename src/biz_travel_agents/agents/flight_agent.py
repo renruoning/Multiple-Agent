@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from ..config import build_chat_model
+from ..config import LLM_CIRCUIT_BREAKER, build_chat_model
+from ..core.resilience import call_with_resilience
 from ..state import TravelState
 from ..tools.flight_tools import search_flights
 
@@ -40,8 +41,21 @@ def flight_node(state: TravelState) -> dict:
     llm = build_chat_model()
     structured_llm = llm.with_structured_output(FlightChoice)
     human_prompt = f"出差需求: {req}\n候选航班: {options}{retry_hint}"
-    choice: FlightChoice = structured_llm.invoke(
-        [("system", SYSTEM_PROMPT), ("human", human_prompt)]
+
+    def _call_llm() -> FlightChoice:
+        return structured_llm.invoke([("system", SYSTEM_PROMPT), ("human", human_prompt)])
+
+    def _fallback_cheapest() -> FlightChoice:
+        # options 已按价格升序排列，LLM 不可用时退化为"直接选最便宜的"，
+        # 保证核心预订链路优先于"选得聪明"。
+        cheapest = options[0]
+        return FlightChoice(
+            flight_no=cheapest["flight_no"],
+            reason="[降级] LLM 不可用，规则兜底选择价格最低的航班",
+        )
+
+    choice = call_with_resilience(
+        _call_llm, breaker=LLM_CIRCUIT_BREAKER, fallback_fn=_fallback_cheapest
     )
 
     selected = next(

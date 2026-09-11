@@ -6,12 +6,19 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
+from .core.circuit_breaker import CircuitBreaker
+
 load_dotenv()
 
 _DEFAULT_MODELS = {
     "anthropic": "claude-sonnet-5",
     "openai": "gpt-4o-mini",
 }
+
+# 所有 Agent 共用同一个 LLM 供应方，因此共用同一个熔断器实例：
+# 一旦发现该依赖持续失败，任何 Agent 的下一次调用都会直接快速失败并
+# 走降级路径，而不必每个调用点各自重新摸索一遍"服务是不是挂了"。
+LLM_CIRCUIT_BREAKER = CircuitBreaker(failure_threshold=3, recovery_timeout=30.0)
 
 
 @dataclass(frozen=True)

@@ -66,7 +66,10 @@ graph TD;
 | `core/idempotency.py` | **幂等**：有副作用的操作（真正下单/扣费）被重复调度时，不能被真正执行第二次 | `tools/booking_tools.py` 包裹 `confirm_booking`，`agents/confirmation_agent.py` 调用；测试见 `tests/test_booking_tools.py`、`tests/test_confirmation_agent.py` |
 | `core/context.py` | **上下文管理**：执行轨迹（messages）会随着 Supervisor 反复打回重选而变长，不能无限制塞进每次 LLM 调用 | `agents/report_agent.py` 生成最终报告前，用 `ContextManager` 把轨迹压缩到固定规模 |
 | `core/planning.py` | **任务规划**：Plan-and-Execute 范式——先生成带依赖关系的任务计划，再按 `next_ready_tasks()` 调度（支持并行任务），是 Supervisor 反应式路由之外的另一种编排方式 | 提供 `build_default_travel_plan()` 作为可插拔的示例，未强制接入主流程（Supervisor 已经用 LLM 做反应式路由）；单测见 `tests/test_core_planning.py` |
-| `core/retry.py` | **重试**：LLM/外部 API 的限流、超时等瞬时错误不应该直接打断整个多智能体流程 | `agents/supervisor.py` 包裹每轮的 LLM 路由调用 |
+| `core/retry.py` | **重试**：LLM/外部 API 的限流、超时等瞬时错误不应该直接打断整个多智能体流程 | 被 `core/resilience.py` 组合使用 |
+| `core/circuit_breaker.py` | **熔断**：下游持续失败时主动"跳闸"快速失败，不再浪费时间重试、加重对方负担；冷却后半开试探恢复 | `config.py` 暴露全 Agent 共享的 `LLM_CIRCUIT_BREAKER` 单例（所有 Agent 用的是同一个 LLM 供应方） |
+| `core/fallback.py` | **降级**：主路径失败时改走兜底方案，而不是让异常向上传播、拖垮整个流程 | 被 `core/resilience.py` 组合使用 |
+| `core/resilience.py` | 把 重试 + 熔断 + 降级 组合成"调用外部依赖"的标准姿势 `call_with_resilience()` | `agents/supervisor.py`（LLM 不可用时退化为规则路由）、`agents/flight_agent.py` / `hotel_agent.py`（LLM 不可用时退化为直接选最便宜的候选） |
 | `core/tracing.py` | **可观测性**：记录每个节点的执行耗时与成败，用于调试/审计 | `graph.py` 用 `traced_node` 包裹所有节点，`main.py` 运行结束后打印 |
 | `core/guardrails.py` | **护栏**：LLM 输出也可能出错（预算给成负数、日期顺序反了），需要一层与业务无关的软校验 | `agents/requirement_agent.py` 校验解析出的需求，违规记入轨迹但不中断流程 |
 
@@ -98,6 +101,11 @@ graph TD;
 - **幂等的副作用操作**：唯一真正"下单"的 `confirm` 步骤用
   `IdempotencyStore` 包裹，Supervisor 重复调度它也不会重复下单
   （见上面 `core/` 表格）。
+- **熔断 + 降级**：Supervisor、机票/酒店Agent 的 LLM 调用都通过
+  `call_with_resilience()` 包裹——LLM 持续故障时熔断器会打开、快速
+  失败，三个 Agent 立刻退化为纯规则兜底（Supervisor 按典型顺序路由，
+  机票/酒店Agent 直接选价格最低的候选），保证核心预订链路在 LLM
+  完全不可用时依然能跑完，只是牺牲了"智能选择"的部分。
 
 ## 目录结构
 
@@ -120,6 +128,9 @@ src/biz_travel_agents/
 ├── core/                    # 通用多智能体基础设施（与业务无关，见下表）
 │   ├── idempotency.py
 │   ├── retry.py
+│   ├── circuit_breaker.py
+│   ├── fallback.py
+│   ├── resilience.py        # 组合 retry + circuit_breaker + fallback
 │   ├── tracing.py
 │   ├── context.py
 │   ├── planning.py

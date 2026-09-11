@@ -9,8 +9,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from ..config import build_chat_model
-from ..core.retry import retry_with_backoff
+from ..config import LLM_CIRCUIT_BREAKER, build_chat_model
+from ..core.resilience import call_with_resilience
 from ..state import TravelState
 
 MAX_ITERATIONS = 12
@@ -63,12 +63,29 @@ def _summarize_state(state: TravelState) -> str:
     )
 
 
-@retry_with_backoff(max_attempts=3, base_delay=0.3, retriable_exceptions=(Exception,))
-def _invoke_structured(structured_llm, messages) -> RouteDecision:
-    # Supervisor 每一轮都要调 LLM，是整个图里被调用最频繁的一环，
-    # 也最值得包一层重试：LLM API 的限流/超时等瞬时错误不应该直接
-    # 打断整个多智能体流程。
-    return structured_llm.invoke(messages)
+def _fallback_route(state: TravelState) -> RouteDecision:
+    """LLM 不可用（重试耗尽或熔断器已 OPEN）时的规则兜底路由。
+
+    复刻 SYSTEM_PROMPT 里描述的典型顺序，牺牲"综合判断超支原因"这类
+    需要 LLM 的智能决策，换取核心链路在 LLM 故障期间仍能继续往前推进。
+    """
+    if not state.get("requirements"):
+        return RouteDecision(next="requirement", reason="[降级] 规则兜底：尚无结构化需求")
+    if not state.get("selected_flight"):
+        return RouteDecision(next="flight", reason="[降级] 规则兜底：尚无机票")
+    if not state.get("selected_hotel"):
+        return RouteDecision(next="hotel", reason="[降级] 规则兜底：尚无酒店")
+    if not state.get("itinerary"):
+        return RouteDecision(next="itinerary", reason="[降级] 规则兜底：尚无行程")
+    budget_check = state.get("budget_check")
+    if not budget_check:
+        return RouteDecision(next="budget", reason="[降级] 规则兜底：尚未做预算审批")
+    if not budget_check.get("approved", False):
+        # 规则兜底无法像 LLM 一样判断超支具体是机票还是酒店导致，统一退回机票Agent
+        return RouteDecision(next="flight", reason="[降级] 规则兜底：预算未通过，退回机票Agent重选")
+    if not state.get("booking_confirmation"):
+        return RouteDecision(next="confirm", reason="[降级] 规则兜底：预算已通过，确认预订")
+    return RouteDecision(next="FINISH", reason="[降级] 规则兜底：流程已完成")
 
 
 def supervisor_node(state: TravelState) -> dict:
@@ -81,8 +98,19 @@ def supervisor_node(state: TravelState) -> dict:
 
     llm = build_chat_model()
     structured_llm = llm.with_structured_output(RouteDecision)
-    decision = _invoke_structured(
-        structured_llm, [("system", SYSTEM_PROMPT), ("human", _summarize_state(state))]
+
+    def _call_llm() -> RouteDecision:
+        return structured_llm.invoke(
+            [("system", SYSTEM_PROMPT), ("human", _summarize_state(state))]
+        )
+
+    # Supervisor 每一轮都要调 LLM，是整个图里被调用最频繁的一环，也是
+    # 单点故障风险最高的一环：一旦它罢工，整个多智能体流程就会卡死。
+    # 因此这里接入完整的 重试 -> 熔断 -> 降级 三层保护（见 core/resilience.py）。
+    decision = call_with_resilience(
+        _call_llm,
+        breaker=LLM_CIRCUIT_BREAKER,
+        fallback_fn=lambda: _fallback_route(state),
     )
 
     summary = f"[协调Agent] 下一步 → {decision.next}。理由：{decision.reason}"

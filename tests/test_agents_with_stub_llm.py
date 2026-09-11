@@ -62,6 +62,25 @@ def test_supervisor_force_finish_at_max_iterations():
     assert update["next_agent"] == "FINISH"
 
 
+class _AlwaysFailingStructuredLLM:
+    def invoke(self, *_args, **_kwargs):
+        raise RuntimeError("LLM API 不可用")
+
+
+class _AlwaysFailingChatModel:
+    def with_structured_output(self, _schema):
+        return _AlwaysFailingStructuredLLM()
+
+
+def test_supervisor_falls_back_to_rule_based_routing_when_llm_unavailable(monkeypatch):
+    monkeypatch.setattr(supervisor, "build_chat_model", lambda: _AlwaysFailingChatModel())
+
+    update = supervisor_node({"iteration": 1, "requirements": {"origin": "北京"}})
+
+    assert update["next_agent"] == "flight"
+    assert "[降级]" in update["messages"][0][1]
+
+
 def test_supervisor_routes_to_confirm_after_budget_approved(monkeypatch):
     fake_result = RouteDecision(next="confirm", reason="预算已通过，尚未确认预订")
     monkeypatch.setattr(supervisor, "build_chat_model", lambda: _FakeChatModel(fake_result))
