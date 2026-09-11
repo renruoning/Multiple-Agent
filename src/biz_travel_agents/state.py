@@ -10,7 +10,7 @@ from typing import Annotated, Any, Literal, Optional
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
-AgentName = Literal["requirement", "flight", "hotel", "itinerary", "budget", "FINISH"]
+AgentName = Literal["requirement", "flight", "hotel", "itinerary", "budget", "confirm", "FINISH"]
 
 
 class TravelState(TypedDict, total=False):
@@ -36,6 +36,9 @@ class TravelState(TypedDict, total=False):
 
     # 预算/审批/报销Agent 产出
     budget_check: Optional[dict[str, Any]]
+
+    # 预订确认Agent 产出（幂等执行，见 tools/booking_tools.py）
+    booking_confirmation: Optional[dict[str, Any]]
 
     # 协调/主控Agent（Supervisor）的路由决策
     next_agent: AgentName

@@ -1,7 +1,7 @@
 """命令行入口：输入一句自然语言出差需求，跑完整个多智能体流程。
 
 用法：
-    python -m biz_travel_agents.main "帮我订一张下周一从北京到上海的机票，住两晚，预算4000元"
+    python -m biz_travel_agents.main "帮我订下周一从北京到上海的机票，住两晚，预算4000元"
 
 未提供参数时会进入交互式输入模式。
 """
@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import sys
 
+from .core.tracing import Tracer
 from .graph import build_graph
 
 
 def run(user_request: str) -> None:
-    app = build_graph()
+    tracer = Tracer()
+    app = build_graph(tracer=tracer)
     initial_state = {
         "user_request": user_request,
         "iteration": 0,
@@ -36,6 +38,12 @@ def run(user_request: str) -> None:
     if final_state and final_state.get("final_report"):
         print("\n最终出差方案：\n")
         print(final_state["final_report"])
+
+    print("\n" + "=" * 60)
+    print("[Trace] 各节点执行耗时（见 core/tracing.py）：")
+    for event in tracer.events:
+        status = "OK" if event.status == "success" else f"ERROR: {event.error}"
+        print(f"  - {event.node}: {event.duration_ms:.1f}ms [{status}]")
 
 
 def main() -> None:

@@ -1,4 +1,5 @@
 from .budget_agent import budget_node
+from .confirmation_agent import confirm_node
 from .flight_agent import flight_node
 from .hotel_agent import hotel_node
 from .itinerary_agent import itinerary_node
@@ -12,6 +13,7 @@ __all__ = [
     "hotel_node",
     "itinerary_node",
     "budget_node",
+    "confirm_node",
     "supervisor_node",
     "report_node",
 ]

@@ -6,6 +6,7 @@ from datetime import date
 from pydantic import BaseModel, Field
 
 from ..config import build_chat_model
+from ..core.guardrails import check, date_order, field_positive
 from ..state import TravelState
 
 SYSTEM_PROMPT = """你是企业智能商旅系统中的「需求理解Agent」。
@@ -45,8 +46,19 @@ def requirement_node(state: TravelState) -> dict:
         f"{requirements['return_date']}，{requirements['travelers']} 人，"
         f"预算 {requirements['budget']:.0f} 元，舱位偏好 {requirements['cabin_preference']}。"
     )
+    messages = [("ai", summary)]
+
+    # 通用护栏：LLM 解析结果也可能出错（比如日期顺序反了、预算给成负数），
+    # 这里做一次软校验，把违规信息记录进轨迹，不中断流程（见 core/guardrails.py）。
+    violations = check(
+        requirements,
+        [field_positive("budget"), date_order("depart_date", "return_date")],
+    )
+    if violations:
+        messages.append(("ai", "[需求理解Agent][护栏告警] " + "；".join(violations)))
+
     return {
         "requirements": requirements,
-        "messages": [("ai", summary)],
+        "messages": messages,
         "iteration": state.get("iteration", 0) + 1,
     }

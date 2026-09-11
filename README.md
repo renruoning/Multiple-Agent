@@ -20,6 +20,7 @@ graph TD;
 	hotel(酒店预订 Agent)
 	itinerary(行程规划 Agent)
 	budget(预算/审批/报销 Agent)
+	confirm(预订确认 Agent)
 	report(报告汇总)
 	__end__([end]):::last
 	__start__ --> supervisor;
@@ -28,11 +29,13 @@ graph TD;
 	hotel --> supervisor;
 	itinerary --> supervisor;
 	budget --> supervisor;
+	confirm --> supervisor;
 	supervisor -.-> requirement;
 	supervisor -.-> flight;
 	supervisor -.-> hotel;
 	supervisor -.-> itinerary;
 	supervisor -.-> budget;
+	supervisor -.-> confirm;
 	supervisor -.-> report;
 	report --> __end__;
 	classDef default fill:#f2f0ff,line-height:1.2
@@ -50,7 +53,31 @@ graph TD;
 | 酒店预订 Agent | 调用酒店查询工具获取候选酒店，结合需求与预算选出最合适的一个 | `agents/hotel_agent.py` |
 | 行程规划 Agent | 整合已选航班/酒店，生成逐日行程安排 | `agents/itinerary_agent.py` |
 | 预算/审批/报销 Agent | 校验总花费是否符合企业差旅政策，超支则打回重选 | `agents/budget_agent.py` |
+| 预订确认 Agent | 预算通过后调用（模拟的）下单接口正式确认，**幂等**执行 | `agents/confirmation_agent.py` |
 | 报告汇总节点 | 流程结束后把所有结果整理成一份 Markdown 方案 | `agents/report_agent.py` |
+
+## 通用基础设施（`core/`）
+
+除了业务 Agent，框架里单独抽出了一层与"商旅"这个具体场景无关的
+**通用多智能体基础设施**，可以直接迁移到其他多智能体项目里：
+
+| 模块 | 解决的问题 | 在本项目里的使用点 |
+|---|---|---|
+| `core/idempotency.py` | **幂等**：有副作用的操作（真正下单/扣费）被重复调度时，不能被真正执行第二次 | `tools/booking_tools.py` 包裹 `confirm_booking`，`agents/confirmation_agent.py` 调用；测试见 `tests/test_booking_tools.py`、`tests/test_confirmation_agent.py` |
+| `core/context.py` | **上下文管理**：执行轨迹（messages）会随着 Supervisor 反复打回重选而变长，不能无限制塞进每次 LLM 调用 | `agents/report_agent.py` 生成最终报告前，用 `ContextManager` 把轨迹压缩到固定规模 |
+| `core/planning.py` | **任务规划**：Plan-and-Execute 范式——先生成带依赖关系的任务计划，再按 `next_ready_tasks()` 调度（支持并行任务），是 Supervisor 反应式路由之外的另一种编排方式 | 提供 `build_default_travel_plan()` 作为可插拔的示例，未强制接入主流程（Supervisor 已经用 LLM 做反应式路由）；单测见 `tests/test_core_planning.py` |
+| `core/retry.py` | **重试**：LLM/外部 API 的限流、超时等瞬时错误不应该直接打断整个多智能体流程 | `agents/supervisor.py` 包裹每轮的 LLM 路由调用 |
+| `core/tracing.py` | **可观测性**：记录每个节点的执行耗时与成败，用于调试/审计 | `graph.py` 用 `traced_node` 包裹所有节点，`main.py` 运行结束后打印 |
+| `core/guardrails.py` | **护栏**：LLM 输出也可能出错（预算给成负数、日期顺序反了），需要一层与业务无关的软校验 | `agents/requirement_agent.py` 校验解析出的需求，违规记入轨迹但不中断流程 |
+
+这些模块都是**纯 Python、不依赖 LLM**，因此都有独立的单元测试
+（`tests/test_core_*.py`），不需要真实 API Key 也能验证框架逻辑本身是对的。
+
+> `planning.py` 目前是独立可用但未强制接入主流程的模块——如果想切换成
+> "先规划、再按依赖并行执行"的编排方式，可以在 Supervisor 里先调用
+> `build_default_travel_plan()` 生成 `Plan`，用 `plan.next_ready_tasks()`
+> 替代 LLM 路由决策，只有失败/审批打回时才让 LLM 重新规划。这是一个
+> 有意留出来的扩展点，用来对比"反应式路由" vs "计划式调度"两种范式。
 
 ### 关键机制
 
@@ -64,10 +91,13 @@ graph TD;
 - **防死循环**：`iteration` 计数器 + `MAX_ITERATIONS` 上限，超过后
   Supervisor 强制 FINISH，避免反复打回导致无限循环。
 - **工具与 Agent 分离**：`tools/` 目录下是模拟的外部系统（机票查询、
-  酒店查询、差旅政策引擎），真实项目中可直接替换为携程/航司/OA
+  酒店查询、差旅政策引擎、下单确认），真实项目中可直接替换为携程/航司/OA
   系统等真实 API，Agent 逻辑不需要改动。
 - **LLM 提供方可插拔**：`config.py` 通过环境变量在 Anthropic / OpenAI
   之间切换，所有 Agent 都通过 `build_chat_model()` 获取模型实例。
+- **幂等的副作用操作**：唯一真正"下单"的 `confirm` 步骤用
+  `IdempotencyStore` 包裹，Supervisor 重复调度它也不会重复下单
+  （见上面 `core/` 表格）。
 
 ## 目录结构
 
@@ -80,11 +110,20 @@ src/biz_travel_agents/
 │   ├── hotel_agent.py
 │   ├── itinerary_agent.py
 │   ├── budget_agent.py
+│   ├── confirmation_agent.py
 │   └── report_agent.py
 ├── tools/                  # 模拟外部系统（可替换为真实 API）
 │   ├── flight_tools.py
 │   ├── hotel_tools.py
-│   └── policy_tools.py
+│   ├── policy_tools.py
+│   └── booking_tools.py    # 有副作用，用 core/idempotency.py 保护
+├── core/                    # 通用多智能体基础设施（与业务无关，见下表）
+│   ├── idempotency.py
+│   ├── retry.py
+│   ├── tracing.py
+│   ├── context.py
+│   ├── planning.py
+│   └── guardrails.py
 ├── config.py                # LLM 提供方配置（Anthropic / OpenAI 可切换）
 ├── state.py                 # 多智能体共享状态定义
 ├── graph.py                 # LangGraph 执行图构建

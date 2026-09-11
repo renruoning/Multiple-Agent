@@ -60,3 +60,17 @@ def test_supervisor_routes_per_stub_decision(monkeypatch):
 def test_supervisor_force_finish_at_max_iterations():
     update = supervisor_node({"iteration": 999})
     assert update["next_agent"] == "FINISH"
+
+
+def test_supervisor_routes_to_confirm_after_budget_approved(monkeypatch):
+    fake_result = RouteDecision(next="confirm", reason="预算已通过，尚未确认预订")
+    monkeypatch.setattr(supervisor, "build_chat_model", lambda: _FakeChatModel(fake_result))
+
+    update = supervisor_node(
+        {
+            "iteration": 5,
+            "budget_check": {"approved": True},
+            "booking_confirmation": None,
+        }
+    )
+    assert update["next_agent"] == "confirm"
